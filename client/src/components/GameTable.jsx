@@ -671,7 +671,7 @@ const GameTable = () => {
                                             padding: '5px 15px',
                                             fontSize: '14px',
                                             backgroundColor: '#ffc107',
-                                            color: '#856404',
+                                            color: 'white',
                                             border: 'none',
                                             borderRadius: '6px',
                                             cursor: 'pointer',
