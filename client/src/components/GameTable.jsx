@@ -9,20 +9,25 @@ import HandResult from './HandResult';
 import AnimatedNumber from './AnimatedNumber';
 import SoundSettings from './SoundSettings';
 import GlobalMessage from './GlobalMessage';
+import Leaderboard from './Leaderboard';
 import { useSocket } from '../contexts/SocketContext';
 import { useGameSounds } from '../hooks/useGameSounds';
 import { useGlobalMessages } from '../hooks/useGlobalMessages';
+import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import './Welcome.css';
 
 const GameTable = () => {
-    const { socket, gameState, privateCards, room, handResult, clearHandResult, isRoomCreator, roomSettings, connectionStatus, isReconnecting, leaveRoom } = useSocket();
+    const { socket, gameState, privateCards, room, handResult, clearHandResult, isRoomCreator, isSpectator, roomSettings, connectionStatus, isReconnecting, leaveRoom } = useSocket();
 
     const [nickname, setNickname] = React.useState('');
     const [roomIdInput, setRoomIdInput] = React.useState('');
     const [showSoundSettings, setShowSoundSettings] = React.useState(false);
     const [previousGameState, setPreviousGameState] = React.useState(null);
     const [copySuccess, setCopySuccess] = React.useState(false);
+    const [showLeaderboard, setShowLeaderboard] = React.useState(false);
     const [showAllHands, setShowAllHands] = React.useState(true); // 本地状态跟踪
+    const [pendingJoinRoom, setPendingJoinRoom] = React.useState(null); // Store pending join info
+    const [initialChips, setInitialChips] = React.useState(1000); // 初始筹码数量
 
     // 从本地存储加载昵称
     React.useEffect(() => {
@@ -38,14 +43,30 @@ const GameTable = () => {
     // 使用全局消息Hook
     const { messages } = useGlobalMessages(gameState, previousGameState);
 
+    // 使用动态标题Hook
+    useDocumentTitle(gameState, socket?.id);
+
     // 更新previousGameState
     React.useEffect(() => {
         if (gameState) {
             setPreviousGameState(gameState);
-        }    }, [gameState]);    // 监听设置变化，同步本地状态
+        }
+    }, [gameState]);
+
+    // 监听游戏结束，显示排行榜
+    React.useEffect(() => {
+        if (gameState && gameState.gameState === 'GAME_OVER' && gameState.leaderboard) {
+            setShowLeaderboard(true);
+        }
+    }, [gameState]);
+
+    // 监听设置变化，同步本地状态
     React.useEffect(() => {
         if (roomSettings && typeof roomSettings.showAllHands === 'boolean') {
             setShowAllHands(roomSettings.showAllHands);
+        }
+        if (roomSettings && typeof roomSettings.initialChips === 'number') {
+            setInitialChips(roomSettings.initialChips);
         }
     }, [roomSettings]);
 
@@ -54,6 +75,9 @@ const GameTable = () => {
         if (gameState?.settings && !roomSettings) {
             if (typeof gameState.settings.showAllHands === 'boolean') {
                 setShowAllHands(gameState.settings.showAllHands);
+            }
+            if (typeof gameState.settings.initialChips === 'number') {
+                setInitialChips(gameState.settings.initialChips);
             }
         }
     }, [gameState?.settings, roomSettings]);
@@ -68,8 +92,34 @@ const GameTable = () => {
                 // 默认值为 true
                 setShowAllHands(true);
             }
+            if (gameState.settings && typeof gameState.settings.initialChips === 'number') {
+                setInitialChips(gameState.settings.initialChips);
+            } else {
+                setInitialChips(1000);
+            }
         }
     }, [room, gameState, isRoomCreator]);
+    
+    // Handle gameInProgress event - ask user if they want to spectate
+    React.useEffect(() => {
+        if (!socket) return;
+        
+        const handleGameInProgress = ({ roomId }) => {
+            const shouldSpectate = window.confirm(
+                '游戏正在进行中。是否以旁观者身份加入？\n\n旁观者无法参与游戏，但可以观看和聊天。'
+            );
+            
+            if (shouldSpectate) {
+                socket.emit('joinRoom', { roomId, nickname, asSpectator: true });
+            }
+        };
+        
+        socket.on('gameInProgress', handleGameInProgress);
+        
+        return () => {
+            socket.off('gameInProgress', handleGameInProgress);
+        };
+    }, [socket, nickname]);
 
     const handleCreateRoom = () => {
         if (nickname) {
@@ -97,7 +147,61 @@ const GameTable = () => {
         if (confirmLeave && room) {
             leaveRoom();
         }
-    };    const handleCopyRoomId = async () => {
+    };
+
+    // 新增：处理重置游戏
+    const handleResetGame = () => {
+        const confirmReset = window.confirm('确定要重置游戏吗？所有玩家将返回准备阶段。');
+        if (confirmReset && room && socket) {
+            socket.emit('resetGame', { roomId: room.id });
+            setShowLeaderboard(false); // Close leaderboard after reset
+        }
+    };
+
+    // 新增：处理结束游戏
+    const handleEndGame = () => {
+        const confirmEnd = window.confirm('确定要结束游戏吗？将显示当前排行榜。');
+        if (confirmEnd && room && socket) {
+            socket.emit('endGame', { roomId: room.id });
+        }
+    };
+
+    // 新增：处理关闭房间
+    const handleCloseRoom = () => {
+        const confirmClose = window.confirm('确定要关闭房间吗？所有玩家将被踢出。');
+        if (confirmClose && room && socket) {
+            socket.emit('closeRoom', { roomId: room.id });
+        }
+    };
+    
+    // 新增：切换到玩家模式
+    const handleSwitchToPlayer = () => {
+        if (room && socket) {
+            socket.emit('switchToPlayer', { roomId: room.id });
+        }
+    };
+    
+    // 新增：切换到旁观者模式
+    const handleSwitchToSpectator = () => {
+        const confirmSwitch = window.confirm('确定要切换到旁观者模式吗？');
+        if (confirmSwitch && room && socket) {
+            socket.emit('switchToSpectator', { roomId: room.id });
+        }
+    };
+    
+    // 新增：处理筹码数量更改
+    const handleChipsChange = () => {
+        const chips = parseInt(initialChips);
+        if (isNaN(chips) || chips < 500 || chips > 50000) {
+            alert('筹码数量必须在500到50000之间');
+            return;
+        }
+        if (room && socket) {
+            socket.emit('updateInitialChips', { roomId: room.id, initialChips: chips });
+        }
+    };
+    
+    const handleCopyRoomId = async () => {
         try {
             await navigator.clipboard.writeText(room.id);
             setCopySuccess(true);
@@ -401,6 +505,44 @@ const GameTable = () => {
                             >
                                 🚪 退出房间
                             </button>
+
+                            {/* 新增：关闭房间按钮 - 仅房主可见 */}
+                            {isRoomCreator && (
+                                <button 
+                                    className="close-room-button"
+                                    onClick={handleCloseRoom}
+                                    style={{
+                                        padding: '10px 20px',
+                                        fontSize: '14px',
+                                        backgroundColor: '#ff6b6b',
+                                        color: 'white',
+                                        border: 'none',
+                                        borderRadius: '8px',
+                                        cursor: 'pointer',
+                                        transition: 'all 0.3s ease',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '6px',
+                                        fontWeight: '500',
+                                        minWidth: '120px',
+                                        justifyContent: 'center',
+                                        boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                                    }}
+                                    onMouseEnter={(e) => {
+                                        e.target.style.backgroundColor = '#ff5252';
+                                        e.target.style.transform = 'translateY(-1px)';
+                                        e.target.style.boxShadow = '0 4px 8px rgba(0,0,0,0.2)';
+                                    }}
+                                    onMouseLeave={(e) => {
+                                        e.target.style.backgroundColor = '#ff6b6b';
+                                        e.target.style.transform = 'translateY(0)';
+                                        e.target.style.boxShadow = '0 2px 4px rgba(0,0,0,0.1)';
+                                    }}
+                                    title="关闭房间（所有玩家将被踢出）"
+                                >
+                                    🔒 关闭房间
+                                </button>
+                            )}
                               {copySuccess && (
                                 <span style={{
                                     fontSize: '13px',
@@ -489,6 +631,71 @@ const GameTable = () => {
                                     (关闭后仅显示获胜者手牌)
                                 </span>
                             </div>
+                            
+                            {/* Initial chips setting */}
+                            <div style={{ 
+                                display: 'flex', 
+                                alignItems: 'center', 
+                                gap: '10px',
+                                marginTop: '15px',
+                                flexWrap: 'wrap' 
+                            }}>
+                                <label style={{ 
+                                    display: 'flex', 
+                                    alignItems: 'center', 
+                                    gap: '8px',
+                                    color: '#856404',
+                                    fontWeight: '500'
+                                }}>
+                                    💰 初始筹码数量：
+                                    <input
+                                        type="number"
+                                        value={initialChips}
+                                        onChange={(e) => setInitialChips(e.target.value)}
+                                        min={500}
+                                        max={50000}
+                                        step={100}
+                                        style={{
+                                            width: '100px',
+                                            padding: '5px 8px',
+                                            fontSize: '14px',
+                                            border: '2px solid #ffc107',
+                                            borderRadius: '6px',
+                                            outline: 'none',
+                                            backgroundColor: 'white'
+                                        }}
+                                    />
+                                    <button
+                                        onClick={handleChipsChange}
+                                        style={{
+                                            padding: '5px 15px',
+                                            fontSize: '14px',
+                                            backgroundColor: '#ffc107',
+                                            color: '#856404',
+                                            border: 'none',
+                                            borderRadius: '6px',
+                                            cursor: 'pointer',
+                                            fontWeight: 'bold',
+                                            transition: 'background-color 0.2s'
+                                        }}
+                                        onMouseEnter={(e) => {
+                                            e.target.style.backgroundColor = '#e0a800';
+                                        }}
+                                        onMouseLeave={(e) => {
+                                            e.target.style.backgroundColor = '#ffc107';
+                                        }}
+                                    >
+                                        确认
+                                    </button>
+                                </label>
+                                <span style={{ 
+                                    fontSize: '12px', 
+                                    color: '#6c757d',
+                                    fontStyle: 'italic'
+                                }}>
+                                    (范围: 500-50000)
+                                </span>
+                            </div>
                         </div>
                     )}
                     
@@ -528,23 +735,96 @@ const GameTable = () => {
                                     {p.nickname} (<AnimatedNumber value={p.chips} className="chips-gain" enablePulse={true} pulseColor="#28a745" /> 筹码)
                                 </li>
                             ))}
-                        </ul>                          <button 
-                            className="start-game-button"
-                            onClick={handleStartGame} 
-                            disabled={!gameState.players || gameState.players.length < 2 || !isRoomCreator}
-                            style={{
-                                padding: '15px 30px',
-                                fontSize: '18px',
-                                backgroundColor: (gameState.players && gameState.players.length >= 2 && isRoomCreator) ? '#007bff' : '#6c757d',
-                                color: 'white',
-                                border: 'none',
-                                borderRadius: '8px',
-                                cursor: (gameState.players && gameState.players.length >= 2 && isRoomCreator) ? 'pointer' : 'not-allowed',
-                                transition: 'background-color 0.3s'
-                            }}
-                        >
-                            {isRoomCreator ? '开始游戏' : '等待房主开始'} ({gameState.players ? gameState.players.length : 0}/2 玩家)
-                        </button>
+                            {gameState.spectators && Object.values(gameState.spectators).map(s => (
+                                <li key={s.id} style={{ 
+                                    padding: '10px',
+                                    backgroundColor: '#e9ecef',
+                                    margin: '5px 0',
+                                    borderRadius: '8px',
+                                    fontSize: '16px',
+                                    color: '#6c757d'
+                                }}>
+                                    {s.nickname} (旁观者)
+                                </li>
+                            ))}
+                        </ul>
+                        
+                        <div style={{
+                            display: 'flex',
+                            gap: '10px',
+                            flexWrap: 'wrap',
+                            justifyContent: 'center',
+                            marginBottom: '15px'
+                        }}>
+                            <button 
+                                className="start-game-button"
+                                onClick={handleStartGame} 
+                                disabled={!gameState.players || gameState.players.length < 2 || !isRoomCreator}
+                                style={{
+                                    padding: '15px 30px',
+                                    fontSize: '18px',
+                                    backgroundColor: (gameState.players && gameState.players.length >= 2 && isRoomCreator) ? '#007bff' : '#6c757d',
+                                    color: 'white',
+                                    border: 'none',
+                                    borderRadius: '8px',
+                                    cursor: (gameState.players && gameState.players.length >= 2 && isRoomCreator) ? 'pointer' : 'not-allowed',
+                                    transition: 'background-color 0.3s'
+                                }}
+                            >
+                                {isRoomCreator ? '开始游戏' : '等待房主开始'} ({gameState.players ? gameState.players.length : 0}/2 玩家)
+                            </button>
+                            
+                            {/* Switch mode button */}
+                            {isSpectator && !isRoomCreator ? (
+                                <button 
+                                    onClick={handleSwitchToPlayer}
+                                    disabled={gameState.players && Object.keys(gameState.players).length >= 8}
+                                    style={{
+                                        padding: '15px 30px',
+                                        fontSize: '18px',
+                                        backgroundColor: '#28a745',
+                                        color: 'white',
+                                        border: 'none',
+                                        borderRadius: '8px',
+                                        cursor: (gameState.players && Object.keys(gameState.players).length >= 8) ? 'not-allowed' : 'pointer',
+                                        transition: 'background-color 0.3s',
+                                        opacity: (gameState.players && Object.keys(gameState.players).length >= 8) ? 0.5 : 1
+                                    }}
+                                    onMouseEnter={(e) => {
+                                        if (!(gameState.players && Object.keys(gameState.players).length >= 8)) {
+                                            e.target.style.backgroundColor = '#218838';
+                                        }
+                                    }}
+                                    onMouseLeave={(e) => {
+                                        e.target.style.backgroundColor = '#28a745';
+                                    }}
+                                >
+                                    🎮 加入对局
+                                </button>
+                            ) : !isRoomCreator && !isSpectator && (
+                                <button 
+                                    onClick={handleSwitchToSpectator}
+                                    style={{
+                                        padding: '15px 30px',
+                                        fontSize: '18px',
+                                        backgroundColor: '#6c757d',
+                                        color: 'white',
+                                        border: 'none',
+                                        borderRadius: '8px',
+                                        cursor: 'pointer',
+                                        transition: 'background-color 0.3s'
+                                    }}
+                                    onMouseEnter={(e) => {
+                                        e.target.style.backgroundColor = '#5a6268';
+                                    }}
+                                    onMouseLeave={(e) => {
+                                        e.target.style.backgroundColor = '#6c757d';
+                                    }}
+                                >
+                                    👁️ 旁观游戏
+                                </button>
+                            )}
+                        </div>
                         
                         {(!gameState.players || gameState.players.length < 2) && (
                             <p style={{ 
@@ -706,27 +986,39 @@ const GameTable = () => {
                         <Pot amount={gameState.mainPot || 0} sidePots={gameState.sidePots || []} />
                     </div>
                     
-                    {/* 玩家手牌区域 */}
-                    <div className="private-cards-area" style={{ 
-                        flex: '1', 
-                        textAlign: 'center',
-                        marginLeft: '40px',
-                        marginRight: '40px'
-                    }}>                        <h4 className="private-cards-title" style={{ 
-                            margin: '0 0 15px 0', 
-                            fontSize: '18px',
-                            color: '#495057'
-                        }}>你的手牌</h4>
-                        <div style={{ 
-                            display: 'flex', 
-                            justifyContent: 'center', 
-                            gap: '5px'
-                        }}>
-                            {privateCards.map((card, index) => (
-                                <Card key={index} suit={card.suit} rank={card.rank} />
-                            ))}
+                    {/* 玩家手牌区域 - 旁观者不显示 */}
+                    {!isSpectator && (
+                        <div className="private-cards-area" style={{ 
+                            flex: '1', 
+                            textAlign: 'center',
+                            marginLeft: '40px',
+                            marginRight: '40px'
+                        }}>                        <h4 className="private-cards-title" style={{ 
+                                margin: '0 0 15px 0', 
+                                fontSize: '18px',
+                                color: '#495057'
+                            }}>你的手牌</h4>
+                            <div style={{ 
+                                display: 'flex', 
+                                justifyContent: 'center', 
+                                gap: '5px'
+                            }}>
+                                {privateCards.map((card, index) => (
+                                    <Card key={index} suit={card.suit} rank={card.rank} />
+                                ))}
+                            </div>
                         </div>
-                    </div>                      {/* 右侧玩家状态信息 */}
+                    )}
+                    
+                    {/* 旁观者占位符 - 保持布局平衡 */}
+                    {isSpectator && (
+                        <div style={{ 
+                            flex: '1', 
+                            textAlign: 'center',
+                            marginLeft: '40px',
+                            marginRight: '40px'
+                        }} />
+                    )}                      {/* 右侧玩家状态信息 */}
                     <div className="player-status-info" style={{ flex: '0 0 auto', width: '120px' }}>
                         <div style={{ 
                             fontSize: '13px', 
@@ -736,22 +1028,38 @@ const GameTable = () => {
                             backgroundColor: '#f8f9fa',
                             borderRadius: '8px',
                             border: '1px solid #dee2e6'
-                        }}>                            <div style={{ marginBottom: '5px', fontWeight: 'bold' }}>我的状态</div><div style={{ marginBottom: '3px' }}>
-                                筹码: <AnimatedNumber value={me?.chips || 0} className="chips-gain" enablePulse={true} pulseColor="#28a745" />
-                            </div>
-                            <div>
-                                已下注: <AnimatedNumber value={me?.currentBet || 0} className="pot-increase" enablePulse={true} pulseColor="#ffc107" />
-                            </div>
+                        }}>
+                            <div style={{ marginBottom: '5px', fontWeight: 'bold' }}>我的状态</div>
+                            {!isSpectator ? (
+                                <>
+                                    <div style={{ marginBottom: '3px' }}>
+                                        筹码: <AnimatedNumber value={me?.chips || 0} className="chips-gain" enablePulse={true} pulseColor="#28a745" />
+                                    </div>
+                                    <div>
+                                        已下注: <AnimatedNumber value={me?.currentBet || 0} className="pot-increase" enablePulse={true} pulseColor="#ffc107" />
+                                    </div>
+                                </>
+                            ) : (
+                                <div style={{ 
+                                    color: '#6c757d',
+                                    fontStyle: 'italic',
+                                    marginTop: '5px'
+                                }}>
+                                    旁观游戏中
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
-                  {/* 操作区域 */}
+                  {/* 操作区域 - 隐藏当游戏结束时 */}
                 <div className="action-area" style={{ 
                     display: 'flex', 
                     justifyContent: 'center',
                     marginBottom: '20px'
                 }}>
-                    {me && <ActionBar roomId={room.id} player={me} gameState={gameState} />}
+                    {me && gameState && gameState.gameState !== 'GAME_OVER' && (
+                        <ActionBar roomId={room.id} player={me} gameState={gameState} />
+                    )}
                 </div>
             </div>            {/* 聊天区域 */}            
             <div className="chat-area" style={{ 
@@ -825,6 +1133,156 @@ const GameTable = () => {
                     >
                         🚪 退出房间
                     </button>
+                    
+                    {/* 关闭房间按钮 - 仅房主可见 */}
+                    {isRoomCreator && (
+                        <button 
+                            onClick={handleCloseRoom}
+                            style={{
+                                padding: '8px 16px',
+                                fontSize: '12px',
+                                backgroundColor: '#ff6b6b',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                transition: 'all 0.3s ease',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '4px',
+                                fontWeight: '500',
+                                boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                            }}
+                            onMouseEnter={(e) => {
+                                e.target.style.backgroundColor = '#ff5252';
+                                e.target.style.transform = 'translateY(-1px)';
+                                e.target.style.boxShadow = '0 4px 8px rgba(0,0,0,0.2)';
+                            }}
+                            onMouseLeave={(e) => {
+                                e.target.style.backgroundColor = '#ff6b6b';
+                                e.target.style.transform = 'translateY(0)';
+                                e.target.style.boxShadow = '0 2px 4px rgba(0,0,0,0.1)';
+                            }}
+                            title="关闭房间（所有玩家将被踢出）"
+                        >
+                            🔒 关闭房间
+                        </button>
+                    )}
+                    
+                    {/* 结束游戏按钮 - 仅房主可见，游戏进行中时 */}
+                    {isRoomCreator && gameState && gameState.gameState !== 'WAITING' && gameState.gameState !== 'GAME_OVER' && (
+                        <button 
+                            onClick={handleEndGame}
+                            style={{
+                                padding: '8px 16px',
+                                fontSize: '12px',
+                                backgroundColor: '#ffc107',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                transition: 'all 0.3s ease',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '4px',
+                                fontWeight: '500',
+                                boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                            }}
+                            onMouseEnter={(e) => {
+                                e.target.style.backgroundColor = '#e0a800';
+                                e.target.style.color = 'white';
+                                e.target.style.transform = 'translateY(-1px)';
+                                e.target.style.boxShadow = '0 4px 8px rgba(0,0,0,0.2)';
+                            }}
+                            onMouseLeave={(e) => {
+                                e.target.style.backgroundColor = '#ffc107';
+                                e.target.style.color = 'white';
+                                e.target.style.transform = 'translateY(0)';
+                                e.target.style.boxShadow = '0 2px 4px rgba(0,0,0,0.1)';
+                            }}
+                            title="结束游戏并显示排行榜"
+                        >
+                            🏁 结束游戏
+                        </button>
+                    )}
+                    
+                    {/* 新游戏按钮 - 仅房主可见，游戏结束后 */}
+                    {isRoomCreator && gameState && gameState.gameState === 'GAME_OVER' && (
+                        <button 
+                            onClick={handleResetGame}
+                            style={{
+                                padding: '8px 16px',
+                                fontSize: '12px',
+                                backgroundColor: '#28a745',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                transition: 'all 0.3s ease',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '4px',
+                                fontWeight: '500',
+                                boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                            }}
+                            onMouseEnter={(e) => {
+                                e.target.style.backgroundColor = '#218838';
+                                e.target.style.color = 'white';
+                                e.target.style.transform = 'translateY(-1px)';
+                                e.target.style.boxShadow = '0 4px 8px rgba(0,0,0,0.2)';
+                            }}
+                            onMouseLeave={(e) => {
+                                e.target.style.backgroundColor = '#28a745';
+                                e.target.style.color = 'white';
+                                e.target.style.transform = 'translateY(0)';
+                                e.target.style.boxShadow = '0 2px 4px rgba(0,0,0,0.1)';
+                            }}
+                            title="重置游戏到准备阶段"
+                        >
+                            🔄 新游戏
+                        </button>
+                    )}
+                    
+                    {/* 查看排行榜按钮 - 所有人可见，游戏结束后 */}
+                    {gameState && gameState.gameState === 'GAME_OVER' && (
+                        <button 
+                            onClick={() => setShowLeaderboard(true)}
+                            style={{
+                                padding: '8px 16px',
+                                fontSize: '12px',
+                                backgroundColor: '#007bff',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                transition: 'all 0.3s ease',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '4px',
+                                fontWeight: '500',
+                                boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                            }}
+                            onMouseEnter={(e) => {
+                                e.target.style.backgroundColor = '#0056b3';
+                                e.target.style.color = 'white';
+                                e.target.style.transform = 'translateY(-1px)';
+                                e.target.style.boxShadow = '0 4px 8px rgba(0,0,0,0.2)';
+                            }}
+                            onMouseLeave={(e) => {
+                                e.target.style.backgroundColor = '#007bff';
+                                e.target.style.color = 'white';
+                                e.target.style.transform = 'translateY(0)';
+                                e.target.style.boxShadow = '0 2px 4px rgba(0,0,0,0.1)';
+                            }}
+                            title="查看游戏结束排行榜"
+                        >
+                            🏆 查看排行榜
+                        </button>
+                    )}
                 </div>
                 
                 {/* ChatBox容器，限制其最大高度 */}
@@ -878,12 +1336,29 @@ const GameTable = () => {
             {handResult && (<HandResult 
                     result={handResult} 
                     socket={socket}
-                    roomId={room.id}                    onClose={() => {
+                    roomId={room.id}
+                    gameState={gameState}
+                    onEndGame={handleEndGame}
+                    onClose={() => {
                         console.log('Hand result closed by user');
                         clearHandResult();
                     }}
                 />
-            )}            {/* 音效设置弹窗 */}
+            )}
+
+            {/* 排行榜遮罩层 */}
+            {showLeaderboard && gameState && gameState.leaderboard && (
+                <Leaderboard 
+                    players={gameState.leaderboard}
+                    isRoomCreator={isRoomCreator}
+                    onNewGame={handleResetGame}
+                    onLeaveRoom={handleLeaveRoom}
+                    onCloseRoom={handleCloseRoom}
+                    onClose={() => setShowLeaderboard(false)}
+                />
+            )}
+
+            {/* 音效设置弹窗 */}
             <SoundSettings 
                 isOpen={showSoundSettings} 
                 onClose={() => setShowSoundSettings(false)} 
